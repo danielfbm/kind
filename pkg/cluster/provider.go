@@ -28,7 +28,10 @@ import (
 	internaldelete "sigs.k8s.io/kind/pkg/cluster/internal/delete"
 	"sigs.k8s.io/kind/pkg/cluster/internal/kubeconfig"
 	internallogs "sigs.k8s.io/kind/pkg/cluster/internal/logs"
-	"sigs.k8s.io/kind/pkg/cluster/internal/providers/docker"
+
+	// "sigs.k8s.io/kind/pkg/cluster/internal/providers/docker"
+
+	"sigs.k8s.io/kind/pkg/cluster/internal/providers/kubernetes"
 	internalprovider "sigs.k8s.io/kind/pkg/cluster/internal/providers/provider"
 )
 
@@ -58,7 +61,8 @@ func NewProvider(options ...ProviderOption) *Provider {
 		o.apply(p)
 	}
 	if p.provider == nil {
-		p.provider = docker.NewProvider(p.logger)
+		// p.provider = docker.NewProvider(p.logger)
+		p.provider = kubernetes.NewProvider(p.logger)
 	}
 	return p
 }

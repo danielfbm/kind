@@ -44,9 +44,23 @@ func planCreation(cluster string, cfg *config.Cluster) (createContainerFuncs []f
 		}
 
 		switch node.Role {
-		// case config.ControlPlaneRole:
-
-		case config.WorkerRole, config.ControlPlaneRole:
+		case config.ControlPlaneRole:
+			createContainerFuncs = append(createContainerFuncs, func() error {
+				// getPodTemplate(node, name, cluster)
+				node.ExtraPortMappings = append(node.ExtraPortMappings,
+					config.PortMapping{
+						ListenAddress: "0.0.0.0",
+						HostPort:      common.APIServerInternalPort,
+						ContainerPort: common.APIServerInternalPort,
+					},
+				)
+				command := createCommandForNode(node, name, cluster)
+				if err := createPod(command); err != nil {
+					return err
+				}
+				return waitUntilRead(ctx, node, name, cluster)
+			})
+		case config.WorkerRole:
 			createContainerFuncs = append(createContainerFuncs, func() error {
 				// getPodTemplate(node, name, cluster)
 				command := createCommandForNode(node, name, cluster)
@@ -209,45 +223,48 @@ metadata:
         {{$key}}: {{$val}}
         {{- end }}
 spec:
-    hostname: {{.hostname}}
+    hostname: {{.name}}
     containers:
     - name: {{.name}}
       image: {{.image}}
       tty: true
       stdin: true
       securityContext:
-		  priviledged: true
-	  volumeMounts:
-	  - name: var
-		mountPath: /var
-	  - name: run
-		mountPath: /run
-	  - name: modules
-		mountPath: /lib/modules
-		readOnly: true
-	volumes:
-	- name: var
-	  emptyDir: {}
-	- name: run
-	  emptyDir: {}
-	- name: modules
-	  hostPath:
-		path: /lib/modules
+          privileged: true
+      volumeMounts:
+      - name: var
+        mountPath: /var
+      - name: run
+        mountPath: /run
+      - name: modules
+        mountPath: /lib/modules
+        readOnly: true
+    volumes:
+    - name: var
+      emptyDir: {}
+    - name: run
+      emptyDir: {}
+    - name: modules
+      hostPath:
+        path: /lib/modules
 ---
 kind: Service
+apiVersion: v1
 metadata:
-	name: {{.name}}
+    name: {{.name}}
 spec:
     selector:
-		{{- range $key, $val := .labels }}
-		{{$key}}: {{$val}}
+        {{- range $key, $val := .labels }}
+        {{$key}}: {{$val}}
 		{{- end }}
-	ports:
-	{{- range $key, $val := .ports }}
-	- protocol: {{$val.PortMappingProtocol}}
-	  port: {{$val.ContainerPort}}
-	  targetPort: {{$val.ContainerPort}}
+	{{- if .ports}}
+    ports:
+    {{- range $key, $val := .ports }}
+    - protocol: TCP
+      port: {{$val.ContainerPort}}
+      targetPort: {{$val.ContainerPort}}
 	{{- end }}
-	type: NodePort
+	{{- end }}
+    type: NodePort
 EOF
 `

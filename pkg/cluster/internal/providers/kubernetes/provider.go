@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/kind/pkg/cluster/internal/providers/provider"
@@ -12,6 +13,13 @@ import (
 	"sigs.k8s.io/kind/pkg/internal/cli"
 	"sigs.k8s.io/kind/pkg/log"
 )
+
+// NewProvider returns a new provider based on executing `docker ...`
+func NewProvider(logger log.Logger) provider.Provider {
+	return &Provider{
+		logger: logger,
+	}
+}
 
 // Provider implements provider.Provider
 // see NewProvider
@@ -48,7 +56,7 @@ func (p *Provider) ListClusters() ([]string, error) {
 		"pod",
 		"-l", clusterLabelKey,
 		// format to include the cluster name
-		"-o", fmt.Sprintf(`jsonpath={.items[*]['metadata.labels.%s']}`, clusterLabelKey),
+		"-o", fmt.Sprintf(`jsonpath={.items[*]['metadata.labels.%s']}`, labelForJSONPath(clusterLabelKey)),
 	)
 	lines, err := exec.OutputLines(cmd)
 	if err != nil {
@@ -60,17 +68,102 @@ func (p *Provider) ListClusters() ([]string, error) {
 // ListNodes returns the nodes under this provider for the given
 // cluster name, they may or may not be running correctly
 func (p *Provider) ListNodes(cluster string) ([]nodes.Node, error) {
-	return nil, nil
+	cmd := exec.Command("kubectl",
+		"get", "pod",
+		"-l", fmt.Sprintf("%s=%s", clusterLabelKey, cluster),
+		// only name
+		"-o", "custom-columns=NAME:.metadata.name",
+		// remove header
+		"--no-headers",
+	)
+	lines, err := exec.OutputLines(cmd)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to list clusters")
+	}
+	// convert names to node handles
+	ret := make([]nodes.Node, 0, len(lines))
+	for _, name := range lines {
+		ret = append(ret, p.node(name))
+	}
+	return ret, nil
 }
 
 // DeleteNodes deletes the provided list of nodes
 // These should be from results previously returned by this provider
 // E.G. by ListNodes()
-func (p *Provider) DeleteNodes([]nodes.Node) error {
+func (p *Provider) DeleteNodes(n []nodes.Node) error {
+	if len(n) == 0 {
+		return nil
+	}
+	const command = "kubectl"
+	args := make([]string, 0, len(n)+3) // allocate once
+	args = append(args,
+		"delete", "pod",
+		"--grace-period=1", // force the container to be delete now
+		"--wait=false",     //do not wait pods to be really deleted
+	)
+	for _, node := range n {
+		args = append(args, node.String())
+	}
+	if err := exec.Command(command, args...).Run(); err != nil {
+		return errors.Wrap(err, "failed to delete pods")
+	}
+
+	// delete services
+	args = args[:]
+	args = append(args,
+		"delete", "svc",
+	)
+	for _, node := range n {
+		args = append(args, node.String())
+	}
+	if err := exec.Command(command, args...).Run(); err != nil {
+		return errors.Wrap(err, "failed to delete services")
+	}
 	return nil
 }
 
 // GetAPIServerEndpoint returns the host endpoint for the cluster's API server
 func (p *Provider) GetAPIServerEndpoint(cluster string) (string, error) {
-	return "", nil
+	// locate the node that hosts this
+	// allNodes, err := p.ListNodes(cluster)
+	// if err != nil {
+	// 	return "", errors.Wrap(err, "failed to list nodes")
+	// }
+	// n, err := nodeutils.APIServerEndpointNode(allNodes)
+	// if err != nil {
+	// 	return "", errors.Wrap(err, "failed to get cluster node")
+	// }
+
+	// kubectl get cluster master ip
+	cmd := exec.Command("kubectl", "cluster-info")
+	lines, err := exec.OutputLines(cmd)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to get api server endpoint")
+	}
+	if len(lines) == 0 || !strings.Contains(lines[0], "Kubernetes master is running at ") {
+		return "", errors.Wrap(err, "failed to get api server endpoint from cluster-info")
+	}
+	masterAddress := strings.ReplaceAll(lines[0], "Kubernetes master is running at ", "")
+	// cmd = exec.Command("kubectl",
+	// 	"get", "svc",
+	// 	n.String(),
+	// 	"-o", "jsonpath={.spec.ports[*]['nodePort']}",
+	// )
+	// lines, err := exec.OutputLines(cmd)
+	// if err != nil {
+	// 	return "", errors.Wrap(err, "failed to get api server endpoint")
+	// }
+	// if len(lines) != 1 {
+	// 	return "", errors.Wrap(err, "failed to get api server service endpoint port")
+	// }
+
+	return masterAddress, nil
+}
+
+// node returns a new node handle for this provider
+func (p *Provider) node(name string) nodes.Node {
+	return &node{
+		name: name,
+	}
 }

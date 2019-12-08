@@ -16,9 +16,15 @@ limitations under the License.
 
 package kubernetes
 
+import "strings"
+
 // clusterLabelKey is applied to each "node" docker container for identification
 const clusterLabelKey = "io.x-k8s.kind.cluster"
 
 // nodeRoleLabelKey is applied to each "node" docker container for categorization
 // of nodes by role
 const nodeRoleLabelKey = "io.x-k8s.kind.role"
+
+func labelForJSONPath(key string) string {
+	return strings.ReplaceAll(key, ".", "\\.")
+}
