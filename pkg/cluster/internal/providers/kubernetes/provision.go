@@ -95,37 +95,35 @@ func waitUntilRead(logger log.Logger, ctx context.Context, node *config.Node, na
 	deadlineTimer := time.NewTimer(deadline.Sub(time.Now()))
 	everySecond := time.Tick(time.Second)
 	go func() {
-		runningTimes := 0
+		stillRunning := 0
 		targetRunningTimes := 10
 		for range everySecond {
-			logger.V(2).Infof("will check if pod %s is running", name)
 			output, err := exec.Command("kubectl", "get", "pod", name, "--no-headers").Output()
 			if err != nil {
 				done <- err
-				break
+				return
 			}
-			logger.V(2).Infof("output for pod %s is %s", name, output)
+			logger.V(2).Infof("pod %s status %s", name, output)
 			columns := strings.Fields(string(output))
 			if len(columns) < 3 {
 				done <- errors.Errorf("pod %s status returned unexpected result: %s", name, output)
-				break
+				return
 			}
 			status := columns[2]
 			switch status {
 			case "Running":
-
-				runningTimes++
-				if runningTimes >= targetRunningTimes {
+				stillRunning++
+				if stillRunning >= targetRunningTimes {
 					done <- nil
-					break
+					return
 				}
 				// break
-			case "CrashLoopBackOff":
-				done <- errors.Errorf("pod %s is crashing", name)
-				break
+			case "CrashLoopBackOff", "ImagePullBackOff":
+				done <- errors.Errorf("pod %s is crashing or with invalid status: %s", name, status)
+				return
 			default:
-				// NO-OP, should be in a transitional state
-				runningTimes = 0
+				// I a transitional state, needs to reset the
+				stillRunning = 0
 			}
 		}
 	}()
@@ -182,43 +180,51 @@ spec:
     containers:
     - name: {{.name}}
       image: {{.image}}
-      tty: true
-      stdin: true
+      # tty: true
+      # stdin: true
       securityContext:
           privileged: true
       volumeMounts:
-      - name: var
-        mountPath: /var
-      - name: run
-        mountPath: /run
+      - name: cgroup
+        mountPath: /sys/fs/cgroup
       - name: modules
         mountPath: /lib/modules
         readOnly: true
+      - name: dind-storage
+        mountPath: /var/lib/docker
+    dnsPolicy: "None"
+    dnsConfig:
+        nameservers:
+        - 1.1.1.1
+        - 1.0.0.1
     volumes:
-    - name: var
-      emptyDir: {}
-    - name: run
-      emptyDir: {}
     - name: modules
       hostPath:
         path: /lib/modules
+        type: Directory
+    - name: cgroup
+      hostPath:
+        path: /sys/fs/cgroup
+        type: Directory
+    - name: dind-storage
+      emptyDir: {}
 ---
-kind: Service
-apiVersion: v1
-metadata:
-    name: {{.name}}
-spec:
-    selector:
-        {{- range $key, $val := .labels }}
-        {{$key}}: {{$val}}
-		{{- end }}
-	{{- if .ports}}
-    ports:
-    {{- range $key, $val := .ports }}
-    - protocol: TCP
-      port: {{$val.ContainerPort}}
-      targetPort: {{$val.ContainerPort}}
-	{{- end }}
-	{{- end }}
-    type: NodePort
+# kind: Service
+# apiVersion: v1
+# metadata:
+#    name: {{.name}}
+# spec:
+#    selector:
+#        {{- range $key, $val := .labels }}
+#        {{$key}}: {{$val}}
+#		{{- end }}
+#	{{- if .ports}}
+#    ports:
+#    {{- range $key, $val := .ports }}
+#    - protocol: TCP
+#      port: {{$val.ContainerPort}}
+#      targetPort: {{$val.ContainerPort}}
+#	{{- end }}
+#	{{- end }}
+#    type: NodePort
 `
