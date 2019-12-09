@@ -42,7 +42,7 @@ func (n *node) getSelf() []string {
 
 func (n *node) Role() (string, error) {
 	args := append([]string{
-		"-o", fmt.Sprintf("jsonformat={.metadata.labels.%s}", labelForJSONPath(nodeRoleLabelKey)),
+		"-o", fmt.Sprintf("jsonpath={.metadata.labels.%s}", labelForJSONPath(nodeRoleLabelKey)),
 	},
 		n.getSelf()...,
 	)
@@ -60,7 +60,7 @@ func (n *node) Role() (string, error) {
 func (n *node) IP() (ipv4 string, ipv6 string, err error) {
 	// retrieve the IP address of the node using docker inspect
 	args := append([]string{
-		"-o", "jsonformat={.status.podIP}",
+		"-o", "jsonpath={.status.podIP}",
 	},
 		n.getSelf()...,
 	)
@@ -112,8 +112,10 @@ func (c *nodeCmd) Run() error {
 	args = append(
 		args,
 		c.nameOrID, // ... against the container
-		c.command,  // with the command specified
+		"--",       // separator, all the other commands and arguments will be given to pod
+		c.command,
 	)
+
 	args = append(
 		args,
 		// finally, with the caller args

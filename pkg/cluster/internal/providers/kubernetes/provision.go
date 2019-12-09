@@ -3,20 +3,23 @@ package kubernetes
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io/ioutil"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"text/template"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/kind/pkg/cluster/internal/providers/provider/common"
 	"sigs.k8s.io/kind/pkg/errors"
 	"sigs.k8s.io/kind/pkg/internal/apis/config"
+	"sigs.k8s.io/kind/pkg/log"
 )
 
 // planCreation creates a slice of funcs that will create the containers
-func planCreation(cluster string, cfg *config.Cluster) (createContainerFuncs []func() error, err error) {
+func planCreation(logger log.Logger, cluster string, cfg *config.Cluster) (createContainerFuncs []func() error, err error) {
 	// these apply to all container creation
 	nodeNamer := common.MakeNodeNamer(cluster)
 	// only the external LB should reflect the port if we have multiple control planes
@@ -54,20 +57,18 @@ func planCreation(cluster string, cfg *config.Cluster) (createContainerFuncs []f
 						ContainerPort: common.APIServerInternalPort,
 					},
 				)
-				command := createCommandForNode(node, name, cluster)
-				if err := createPod(command); err != nil {
+				if err := createPodForNode(logger, node, name, cluster); err != nil {
 					return err
 				}
-				return waitUntilRead(ctx, node, name, cluster)
+				return waitUntilRead(logger, ctx, node, name, cluster)
 			})
 		case config.WorkerRole:
 			createContainerFuncs = append(createContainerFuncs, func() error {
 				// getPodTemplate(node, name, cluster)
-				command := createCommandForNode(node, name, cluster)
-				if err := createPod(command); err != nil {
+				if err := createPodForNode(logger, node, name, cluster); err != nil {
 					return err
 				}
-				return waitUntilRead(ctx, node, name, cluster)
+				return waitUntilRead(logger, ctx, node, name, cluster)
 			})
 		default:
 			return nil, errors.Errorf("unknown node role: %q", node.Role)
@@ -76,109 +77,55 @@ func planCreation(cluster string, cfg *config.Cluster) (createContainerFuncs []f
 	return
 }
 
-func getPodTemplate(node *config.Node, name, cluster string) corev1.Pod {
-	trueBool := true
-	basicPod := corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-			Labels: map[string]string{
-				clusterLabelKey:  cluster,
-				nodeRoleLabelKey: string(node.Role),
-			},
-		},
-		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyAlways,
-			HostNetwork:   false,
-			Hostname:      name,
-			Containers: []corev1.Container{
-				corev1.Container{
-					Name:  name,
-					Image: node.Image,
-					TTY:   true,
-					Stdin: true,
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: &trueBool,
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						corev1.VolumeMount{
-							Name:      "var",
-							MountPath: "/var",
-						},
-						corev1.VolumeMount{
-							Name:      "run",
-							MountPath: "/run",
-						},
-						corev1.VolumeMount{
-							Name:      "modules",
-							MountPath: "/lib/modules",
-							ReadOnly:  true,
-						},
-					},
-					Ports: []corev1.ContainerPort{
-						corev1.ContainerPort{},
-					},
-				},
-			},
-			Volumes: []corev1.Volume{
-				corev1.Volume{
-					Name: "var",
-					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{},
-					},
-				},
-				corev1.Volume{
-					Name: "run",
-					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{},
-					},
-				},
-				corev1.Volume{
-					Name: "modules",
-					VolumeSource: corev1.VolumeSource{
-						HostPath: &corev1.HostPathVolumeSource{
-							Path: "/lib/modules",
-						},
-					},
-				},
-			},
-		},
-	}
+// func createPod(command string) error {
+// 	if err := exec.Command(command).Run(); err != nil {
+// 		return errors.Wrap(err, "kubectl apply error")
+// 	}
+// 	return nil
+// }
 
-	return basicPod
-}
-
-func createPod(command string) error {
-	if err := exec.Command(command).Run(); err != nil {
-		return errors.Wrap(err, "kubectl apply error")
-	}
-	return nil
-}
-
-func waitUntilRead(ctx context.Context, node *config.Node, name, cluster string) error {
+func waitUntilRead(logger log.Logger, ctx context.Context, node *config.Node, name, cluster string) error {
 
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(time.Minute * 30)
 	}
+	logger.V(2).Infof("deadline for node %s is %v", name, deadline)
 	done := make(chan error)
 	deadlineTimer := time.NewTimer(deadline.Sub(time.Now()))
 	everySecond := time.Tick(time.Second)
 	go func() {
+		runningTimes := 0
+		targetRunningTimes := 10
 		for range everySecond {
-			output, err := exec.Command("kubectl", "get", "pod", name, "--no-headers", "|", "awk", "'{print $3}|").Output()
+			logger.V(2).Infof("will check if pod %s is running", name)
+			output, err := exec.Command("kubectl", "get", "pod", name, "--no-headers").Output()
 			if err != nil {
 				done <- err
 				break
 			}
-			switch string(output) {
-			case "Running":
-				done <- nil
+			logger.V(2).Infof("output for pod %s is %s", name, output)
+			columns := strings.Fields(string(output))
+			if len(columns) < 3 {
+				done <- errors.Errorf("pod %s status returned unexpected result: %s", name, output)
 				break
+			}
+			status := columns[2]
+			switch status {
+			case "Running":
+
+				runningTimes++
+				if runningTimes >= targetRunningTimes {
+					done <- nil
+					break
+				}
+				// break
 			case "CrashLoopBackOff":
 				done <- errors.Errorf("pod %s is crashing", name)
 				break
 			default:
-				// NO-OP
+				// NO-OP, should be in a transitional state
+				runningTimes = 0
 			}
 		}
 	}()
@@ -190,10 +137,10 @@ func waitUntilRead(ctx context.Context, node *config.Node, name, cluster string)
 	}
 }
 
-func createCommandForNode(node *config.Node, name, cluster string) (command string) {
+func createPodForNode(logger log.Logger, node *config.Node, name, cluster string) (err error) {
 	tem, _ := podTemplateInst.Parse(podTemplate)
 	writer := &bytes.Buffer{}
-	err := tem.Execute(writer, map[string]interface{}{
+	if err = tem.Execute(writer, map[string]interface{}{
 		"name": name,
 		"labels": map[string]string{
 			clusterLabelKey:  cluster,
@@ -202,19 +149,27 @@ func createCommandForNode(node *config.Node, name, cluster string) (command stri
 		"image":   node.Image,
 		"volumes": node.ExtraMounts,
 		"ports":   node.ExtraPortMappings,
-	})
-	if err != nil {
-		panic(err)
+	}); err != nil {
+		return
 	}
-	command = writer.String()
+	fileName := fmt.Sprintf("%s-%s.yaml", cluster, name)
+	logger.V(2).Infof("filename %s", fileName)
+	logger.V(2).Infof("file content\n%s", writer.String())
+	if err = ioutil.WriteFile(fileName, writer.Bytes(), os.ModePerm); err != nil {
+		err = errors.Wrap(err, "write temporary file error")
+		return
+	}
+	defer os.Remove(fileName)
+
+	if err = exec.Command("kubectl", "apply", "-f", fileName).Run(); err != nil {
+		err = errors.Wrap(err, "kubectl apply error")
+	}
 	return
 }
 
 var podTemplateInst = template.New("podTemplate")
 
-const podTemplate = `
-cat <<EOF | kubectl apply -f -
-kind: Pod
+const podTemplate = `kind: Pod
 apiVersion: v1
 metadata:
     name: {{.name}}
@@ -266,5 +221,4 @@ spec:
 	{{- end }}
 	{{- end }}
     type: NodePort
-EOF
 `
