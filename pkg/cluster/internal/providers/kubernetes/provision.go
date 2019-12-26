@@ -176,27 +176,52 @@ metadata:
         {{$key}}: {{$val}}
         {{- end }}
 spec:
+    #securityContext:
+    #    sysctls:
+    #    - name: net.ipv6.conf.all.disable_ipv6
+    #      value: "1"
+    #    - name: net.ipv6.conf.all.forwarding
+    #      value: "0"
     hostname: {{.name}}
+    automountServiceAccountToken: false
+    initContainers:
+    - name: initvolume
+      image: {{.image}}
+      command:
+      - "/bin/bash"
+      args:
+      - "-c"
+      - "ls -lha /var && cp -R /var/* /storage &&  cp -R /run/* /runstg "
+      volumeMounts:
+      - name: dind-storage
+        mountPath: /storage
+      - name: tmp
+        mountPath: /tmpstg
+      - name: run-folder
+        mountPath: /runstg
     containers:
     - name: {{.name}}
       image: {{.image}}
-      # tty: true
-      # stdin: true
       securityContext:
           privileged: true
+      resources:
+          limits:
+             cpu: "1000m"
+             memory: "1024Mi"
       volumeMounts:
-      - name: cgroup
-        mountPath: /sys/fs/cgroup
       - name: modules
         mountPath: /lib/modules
         readOnly: true
       - name: dind-storage
-        mountPath: /var/lib/docker
-    dnsPolicy: "None"
-    dnsConfig:
-        nameservers:
-        - 1.1.1.1
-        - 1.0.0.1
+        mountPath: /var
+        #mountPath: /var/lib/docker
+      - name: run-folder
+        mountPath: /run
+      - name: tmp
+        mountPath: /tmp
+    #hostNetwork: true
+    #nodeSelector:
+    #  kubernetes.io/hostname: zxd-region-192.168.23.2
     volumes:
     - name: modules
       hostPath:
@@ -207,6 +232,10 @@ spec:
         path: /sys/fs/cgroup
         type: Directory
     - name: dind-storage
+      emptyDir: {}
+    - name: run-folder
+      emptyDir: {}
+    - name: tmp
       emptyDir: {}
 ---
 # kind: Service
